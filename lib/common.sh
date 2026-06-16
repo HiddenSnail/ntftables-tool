@@ -25,8 +25,49 @@ if [ -z "${SCRIPT_DIR:-}" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 
+# ---- Dry-run / 测试模式 ----
+# 环境变量 NFT_DRY_RUN=true 或 --dry-run 参数启用
+# 启用后所有 nft 命令仅打印不执行
+NFT_DRY_RUN="${NFT_DRY_RUN:-false}"
+
+# ---- nft 命令包装器 ----
+# 所有 nft 调用自动经过此函数，支持 dry-run 和 mock 注入。
+# 测试时设置 NFT_MOCK_DIR 指向 mock nft 脚本所在目录，
+# 该目录下的 nft 脚本会代替系统 nft 执行。
+nft() {
+    # Dry-run 模式优先：只打印，不执行（包括不走 mock）
+    if [ "$NFT_DRY_RUN" = "true" ]; then
+        echo "[DRY RUN] nft $*" >&2
+        return 0
+    fi
+
+    # 测试 mock 模式
+    if [ -n "${NFT_MOCK_DIR:-}" ] && [ -x "${NFT_MOCK_DIR}/nft" ]; then
+        "${NFT_MOCK_DIR}/nft" "$@"
+        return $?
+    fi
+
+    # 正常模式：调用真实 nft
+    command nft "$@"
+}
+
+# 直接读取 nftables 规则集（绕过 dry-run，供 save 命令使用）
+_nft_list_ruleset_raw() {
+    if [ "$NFT_DRY_RUN" = "true" ]; then
+        echo "[DRY RUN] nft list ruleset" >&2
+    elif [ -n "${NFT_MOCK_DIR:-}" ] && [ -x "${NFT_MOCK_DIR}/nft" ]; then
+        "${NFT_MOCK_DIR}/nft" list ruleset
+    else
+        command nft list ruleset
+    fi
+}
+
 # ---- 权限检查 ----
 check_root() {
+    # 测试环境跳过 root 检查
+    if [ "${NFT_SKIP_ROOT_CHECK:-}" = "true" ]; then
+        return 0
+    fi
     if [ "$(id -u)" -ne 0 ]; then
         log_error "此操作需要 root 权限，请使用 sudo 运行。"
         exit 1
@@ -76,7 +117,7 @@ detect_os() {
 
 # ---- nft 命令检测 ----
 nft_available() {
-    command -v nft &>/dev/null
+    [ "$NFT_DRY_RUN" = "true" ] || [ -n "${NFT_MOCK_DIR:-}" ] || command -v nft &>/dev/null
 }
 
 # ---- nftables 服务检测 ----
@@ -124,9 +165,9 @@ list_available_templates() {
             name="$(basename "$f" .conf)"
             # 跳过 example 文件
             [[ "$name" == *example* ]] && continue
-            # 读取模板 NAME
+            # 读取模板 NAME（兼容 macOS BSD grep，不使用 -P）
             local display_name
-            display_name=$(grep -oP '^NAME="\K[^"]*' "$f" 2>/dev/null || echo "$name")
+            display_name=$(grep '^NAME=' "$f" 2>/dev/null | sed 's/^NAME="//;s/"$//' || echo "$name")
             echo "  - ${name}  (${display_name})"
         done
     fi

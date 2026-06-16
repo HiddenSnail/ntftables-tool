@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+#===============================================================================
+# mock nft — 模拟 nftables 命令用于测试
+#
+# 状态存储在 $NFT_MOCK_STATE_DIR（默认 /tmp/nft-mock-state）
+# 调用日志写入 $NFT_MOCK_LOG（默认 /tmp/nft-mock.log）
+#===============================================================================
+
+set -euo pipefail
+
+MOCK_STATE="${NFT_MOCK_STATE_DIR:-/tmp/nft-mock-state}"
+MOCK_LOG="${NFT_MOCK_LOG:-/tmp/nft-mock.log}"
+mkdir -p "$MOCK_STATE"
+
+# ---- 日志 ----
+_log() { echo "$(date +%s) $*" >> "$MOCK_LOG"; }
+_fail() { echo "nft: $*" >&2; exit 1; }
+
+# ---- 状态文件路径 ----
+_table_file()  { echo "$MOCK_STATE/table_$1"; }
+_set_file()    { echo "$MOCK_STATE/set_${1}_${2}"; }
+_chain_file()  { echo "$MOCK_STATE/chain_${1}_${2}"; }
+
+# ---- 状态读写 ----
+_table_exists() { [ -f "$(_table_file "$1")" ]; }
+_set_exists()   { [ -f "$(_set_file "$1" "$2")" ]; }
+_chain_exists() { [ -f "$(_chain_file "$1" "$2")" ]; }
+
+_list_tables() {
+    for f in "$MOCK_STATE"/table_*; do
+        [ -f "$f" ] || continue
+        local t="${f##*table_}"
+        echo "table $t"
+    done
+}
+
+_list_sets() {
+    local table="$1"
+    for f in "$MOCK_STATE"/set_*; do
+        [ -f "$f" ] || continue
+        local name="${f##*set_}"
+        local t="${name%%_*}"
+        local s="${name#*_}"
+        [ "$t" = "$table" ] || continue
+        echo "    set $s {"
+        echo "        type ipv4_addr"
+        cat "$f" | while read -r elem; do
+            [ -n "$elem" ] && echo "        elements = { $elem }"
+        done
+        echo "    }"
+    done
+}
+
+# ---- 主逻辑 ----
+main() {
+    _log "$@"
+
+    case "$1" in
+        --version)
+            echo "nftables v1.0.9 (Mock)"
+            ;;
+
+        list)
+            case "$2" in
+                tables)
+                    _list_tables
+                    ;;
+                ruleset)
+                    for t in "$MOCK_STATE"/table_*; do
+                        [ -f "$t" ] || continue
+                        local tname="${t##*table_}"
+                        echo "table $tname {"
+                        # chains
+                        for c in "$MOCK_STATE"/chain_*; do
+                            [ -f "$c" ] || continue
+                            local cname="${c##*chain_}"
+                            local ct="${cname%%_*}"
+                            [ "$ct" = "$tname" ] || continue
+                            local cn="${cname#*_}"
+                            echo "    chain $cn {"
+                            cat "$c" | while read -r rule; do
+                                [ -n "$rule" ] && echo "        $rule"
+                            done
+                            echo "    }"
+                        done
+                        # sets
+                        _list_sets "$tname"
+                        echo "}"
+                    done
+                    ;;
+                table)
+                    local table="$3"
+                    if ! _table_exists "$table"; then
+                        _fail "table $table does not exist"
+                    fi
+                    echo "table $table {"
+                    for c in "$MOCK_STATE"/chain_*; do
+                        [ -f "$c" ] || continue
+                        local cname="${c##*chain_}"
+                        local ct="${cname%%_*}"
+                        [ "$ct" = "$table" ] || continue
+                        local cn="${cname#*_}"
+                        echo "    chain $cn {"
+                        cat "$c" | while read -r rule; do
+                            [ -n "$rule" ] && echo "        $rule"
+                        done
+                        echo "    }"
+                    done
+                    _list_sets "$table"
+                    echo "}"
+                    ;;
+                chain)
+                    local table="$3"
+                    local chain="$4"
+                    if ! _chain_exists "$table" "$chain"; then
+                        _fail "chain $chain does not exist in table $table"
+                    fi
+                    echo "table $table {"
+                    echo "    chain $chain {"
+                    cat "$(_chain_file "$table" "$chain")" | while read -r rule; do
+                        [ -n "$rule" ] && echo "        $rule"
+                    done
+                    echo "    }"
+                    echo "}"
+                    ;;
+                set|sets)
+                    local table="$3"
+                    if [ "$2" = "sets" ]; then
+                        if ! _table_exists "$table"; then
+                            _fail "table $table does not exist"
+                        fi
+                        _list_sets "$table"
+                    else
+                        local set_name="$4"
+                        if ! _set_exists "$table" "$set_name"; then
+                            _fail "set $set_name does not exist in table $table"
+                        fi
+                        echo "table $table {"
+                        echo "    set $set_name {"
+                        echo "        type ipv4_addr"
+                        echo "        elements = { $(cat "$(_set_file "$table" "$set_name")" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g') }"
+                        echo "    }"
+                        echo "}"
+                    fi
+                    ;;
+            esac
+            ;;
+
+        add)
+            case "$2" in
+                table)
+                    local table="$3"
+                    mkdir -p "$MOCK_STATE"
+                    touch "$(_table_file "$table")"
+                    ;;
+                chain)
+                    local table="$3"
+                    local chain="$4"
+                    mkdir -p "$MOCK_STATE"
+                    touch "$(_chain_file "$table" "$chain")"
+                    ;;
+                set)
+                    local table="$3"
+                    local set_name="$4"
+                    mkdir -p "$MOCK_STATE"
+                    touch "$(_set_file "$table" "$set_name")"
+                    ;;
+                element)
+                    local table="$3"
+                    local set_name="$4"
+                    local elem="$5"
+                    elem="${elem#\{ }"
+                    elem="${elem% \}}"
+                    if _set_exists "$table" "$set_name"; then
+                        echo "$elem" >> "$(_set_file "$table" "$set_name")"
+                    else
+                        _fail "set $set_name does not exist"
+                    fi
+                    ;;
+                rule)
+                    # shift args to get: table chain rule_body...
+                    local table="$3"
+                    local chain="$4"
+                    shift 4
+                    local rule="$*"
+                    if _chain_exists "$table" "$chain"; then
+                        echo "$rule" >> "$(_chain_file "$table" "$chain")"
+                    else
+                        _fail "chain $chain does not exist"
+                    fi
+                    ;;
+            esac
+            ;;
+
+        delete)
+            case "$2" in
+                table)
+                    local table="$3"
+                    rm -f "$(_table_file "$table")"
+                    rm -f "$MOCK_STATE"/chain_*
+                    rm -f "$MOCK_STATE"/set_*
+                    ;;
+                element)
+                    local table="$3"
+                    local set_name="$4"
+                    local elem="$5"
+                    elem="${elem#\{ }"
+                    elem="${elem% \}}"
+                    if _set_exists "$table" "$set_name"; then
+                        # 检查元素是否存在
+                        if grep -qFx "$elem" "$(_set_file "$table" "$set_name")" 2>/dev/null; then
+                            local tmp="$(_set_file "$table" "$set_name").tmp"
+                            grep -vFx "$elem" "$(_set_file "$table" "$set_name")" > "$tmp" 2>/dev/null || true
+                            mv "$tmp" "$(_set_file "$table" "$set_name")"
+                        else
+                            _fail "element $elem does not exist in set $set_name"
+                        fi
+                    else
+                        _fail "set $set_name does not exist"
+                    fi
+                    ;;
+            esac
+            ;;
+
+        flush)
+            case "$2" in
+                ruleset)
+                    rm -f "$MOCK_STATE"/table_*
+                    rm -f "$MOCK_STATE"/chain_*
+                    rm -f "$MOCK_STATE"/set_*
+                    ;;
+            esac
+            ;;
+
+        -a)
+            # handle -a flag for list (add handle numbers)
+            shift
+            case "$1" in
+                list)
+                    shift
+                    main list "$@" | awk '{if (/^        /) print $0 " # handle " NR; else print}'
+                    ;;
+            esac
+            ;;
+
+        -c)
+            # syntax check — always pass
+            ;;
+    esac
+}
+
+main "$@"

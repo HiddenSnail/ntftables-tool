@@ -56,7 +56,12 @@ _get_rule_handles() {
 # 保存规则到 /etc/nftables.conf
 _save_rules() {
     log_step "持久化规则到 /etc/nftables.conf..."
-    nft list ruleset > /etc/nftables.conf
+    # 测试/mock 模式下写入 /dev/null
+    if [ -n "${NFT_MOCK_DIR:-}" ] || [ "$NFT_DRY_RUN" = "true" ]; then
+        _nft_list_ruleset_raw > /dev/null 2>/dev/null || true
+    else
+        _nft_list_ruleset_raw > /etc/nftables.conf
+    fi
     log_info "规则已保存。"
 }
 
@@ -64,6 +69,7 @@ _save_rules() {
 # cmd_init - 初始化表结构、安全基线、开机自启
 # =============================================================================
 cmd_init() {
+    set +e; set +o pipefail
     check_root
 
     log_info "正在初始化 nftables 白名单工具..."
@@ -193,6 +199,8 @@ cmd_allow() {
     local template_name="$1"
     local ip_range="$2"
 
+    set +e; set +o pipefail
+
     check_root
     validate_template_name "$template_name"
     validate_ip_range "$ip_range"
@@ -204,11 +212,13 @@ cmd_allow() {
 
     log_info "正在为 ${NAME}（${template_name}）添加白名单: $ip_range"
 
-    # 确保表存在
-    if ! _table_exists; then
-        log_error "表 $TABLE 不存在，请先执行 init。"
-        log_info "运行: sudo ./nftables-tool.sh init"
-        exit 1
+    # 确保表存在（dry-run 模式跳过检查）
+    if [ "$NFT_DRY_RUN" != "true" ]; then
+        if ! _table_exists; then
+            log_error "表 $TABLE 不存在，请先执行 init。"
+            log_info "运行: sudo ./nftables-tool.sh init"
+            exit 1
+        fi
     fi
 
     # 1. 创建中间件链（幂等）
@@ -268,6 +278,8 @@ cmd_deny() {
     local template_name="$1"
     local ip_range="$2"
 
+    set +e; set +o pipefail
+
     check_root
     validate_template_name "$template_name"
     validate_ip_range "$ip_range"
@@ -297,7 +309,7 @@ cmd_deny() {
 
     # 检查集合是否为空，提示用户清理
     local remaining
-    remaining=$(nft list set "$TABLE" "$set_name" 2>/dev/null | grep -cE '^\s+[0-9]' || echo "0")
+    remaining=$(nft list set "$TABLE" "$set_name" 2>/dev/null | grep 'elements = {' | sed 's/.*elements = { *//;s/ *}.*//' | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ' || echo "0")
     if [ "$remaining" -eq 0 ]; then
         log_warn "${NAME} 白名单已为空。"
         log_info "如需清理对应链和规则，请手动执行:"
@@ -313,7 +325,10 @@ cmd_deny() {
 # cmd_list - 列出白名单规则
 # =============================================================================
 cmd_list() {
-    local filter="$1"
+    local filter="${1:-}"
+
+    # 临时关闭 errexit + pipefail，避免 grep/awk 空结果触发退出
+    set +e; set +o pipefail
 
     echo ""
     echo "============================================"
@@ -324,17 +339,17 @@ cmd_list() {
         echo "  表 $TABLE 不存在，请先执行 init。"
         echo "  运行: sudo ./nftables-tool.sh init"
         echo ""
-        return
+        return 0
     fi
 
     # 查找所有 _allow 集合
     local sets
-    sets=$(nft list sets "$TABLE" 2>/dev/null | grep -oP '\S+(?=_allow)' | sort -u || true)
+    sets=$(nft list sets "$TABLE" 2>/dev/null | grep -oE '\S+_allow' | sed 's/_allow$//' | sort -u || true)
 
     if [ -z "$sets" ]; then
         echo "  暂无白名单规则。"
         echo ""
-        return
+        return 0
     fi
 
     for s in $sets; do
@@ -356,32 +371,34 @@ cmd_list() {
         # 从端口集合中读取
         local port_set="${s}_ports"
         if nft list set "$TABLE" "$port_set" &>/dev/null; then
-            nft list set "$TABLE" "$port_set" 2>/dev/null | grep -oP '^\s+\K[0-9]+(-[0-9]+)?' | while read -r p; do
-                echo "     - $p"
-            done
+            nft list set "$TABLE" "$port_set" 2>/dev/null | grep 'elements = {' | sed 's/.*elements = { *//;s/ *}.*//' | tr ',' '\n' | sed 's/^ *//;s/ *$//' | while read -r p; do
+                [ -n "$p" ] && echo "     - $p"
+            done || true
         else
             echo "     (未配置)"
         fi
 
         echo "   白名单 IP:"
         local elements
-        elements=$(nft list set "$TABLE" "$set_full" 2>/dev/null | grep -oP '^\s+\K[0-9.]+(?:/[0-9]+)?' || true)
+        elements=$(nft list set "$TABLE" "$set_full" 2>/dev/null | grep 'elements = {' | sed 's/.*elements = { *//;s/ *}.*//' | tr ',' '\n' | sed 's/^ *//;s/ *$//' || true)
         if [ -z "$elements" ]; then
             echo "     (空)"
         else
             echo "$elements" | while read -r ip; do
                 echo "     - $ip"
-            done
+            done || true
         fi
     done
 
     echo ""
+    return 0
 }
 
 # =============================================================================
 # cmd_status - 运行状态
 # =============================================================================
 cmd_status() {
+    set +e; set +o pipefail
     echo ""
     echo "============================================"
     echo "  nftables-tool 状态"
@@ -395,7 +412,7 @@ cmd_status() {
         echo "nft 状态:   ✗ 未安装"
         echo "运行 'sudo ./nftables-tool.sh install' 安装。"
         echo ""
-        return
+        return 0
     fi
 
     # 服务状态
@@ -424,13 +441,13 @@ cmd_status() {
 
         # 逐个集合统计 IP 数
         local sets
-        sets=$(nft list sets "$TABLE" 2>/dev/null | grep -oP '\S+(?=_allow)' | sort -u || true)
+        sets=$(nft list sets "$TABLE" 2>/dev/null | grep -oE '\S+_allow' | sed 's/_allow$//' | sort -u || true)
         if [ -n "$sets" ]; then
             echo ""
             echo "各集合 IP 数量:"
             for s in $sets; do
                 local count
-                count=$(nft list set "$TABLE" "${s}_allow" 2>/dev/null | grep -cE '^\s+[0-9]' || echo "0")
+                count=$(nft list set "$TABLE" "${s}_allow" 2>/dev/null | grep 'elements = {' | sed 's/.*elements = { *//;s/ *}.*//' | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ' || echo "0")
                 echo "  - ${s}: ${count} 个 IP"
             done
         fi
@@ -441,6 +458,7 @@ cmd_status() {
     fi
 
     echo ""
+    return 0
 }
 
 # =============================================================================
@@ -455,25 +473,28 @@ cmd_save() {
 # cmd_reset - 清除本工具所有规则
 # =============================================================================
 cmd_reset() {
+    set +e; set +o pipefail
     check_root
 
     echo ""
     if ! _table_exists; then
         log_info "表 $TABLE 不存在，无需清除。"
         echo ""
-        return
+        return 0
     fi
 
     log_warn "即将删除以下所有规则:"
     nft list table "$TABLE" 2>/dev/null || true
     echo ""
 
-    # 简单确认（非交互模式下直接执行）
-    if [ -t 0 ]; then
+    # 简单确认（非交互模式或 FORCE 模式下直接执行）
+    if [ "${NFT_RESET_FORCE:-}" = "true" ]; then
+        :  # 跳过确认
+    elif [ -t 0 ]; then
         read -r -p "确认删除? 输入 yes 继续: " confirm
         if [ "$confirm" != "yes" ]; then
             log_info "已取消。"
-            return
+            return 0
         fi
     fi
 
@@ -483,4 +504,5 @@ cmd_reset() {
 
     log_info "✓ 已清除 nftables-tool 的所有规则。"
     echo ""
+    return 0
 }

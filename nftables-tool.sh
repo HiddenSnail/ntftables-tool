@@ -23,6 +23,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---- 加载库 ----
 # shellcheck source=lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
+
+# ---- 解析全局参数 ----
+# --dry-run 必须在子命令之前
+if [[ "${1:-}" == "--dry-run" ]]; then
+    NFT_DRY_RUN="true"
+    export NFT_DRY_RUN
+    shift
+fi
 # shellcheck source=lib/installer.sh
 source "${SCRIPT_DIR}/lib/installer.sh"
 # shellcheck source=lib/core.sh
