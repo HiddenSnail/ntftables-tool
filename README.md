@@ -1,37 +1,45 @@
 # nftables-tool
 
-基于 nftables 的 IP 白名单端口访问控制工具。以白名单方式，让指定 IP 段访问指定中间件端口，支持多种中间件内置模板，一键管理。
+基于 nftables 的 IP 白名单端口访问控制工具。以白名单方式，让指定 IP 段访问指定中间件端口。内置 10+ 中间件模板，支持端口范围，一键管理。
+
+## 设计原则
+
+- **最小干扰**：input 链默认 `policy accept`，仅拦截通过 `allow` 声明的端口，其余流量原样放行，不影响系统已有防火墙规则
+- **ipset 风格**：IP 白名单和端口都用 nftables named set 管理，增删元素不触碰规则本身
+- **独立表隔离**：使用专属表 `inet nftables-tool`，`reset` 仅清除自己
 
 ## 依赖
 
-- Linux 内核 >= 3.13（nftables 要求）
-- nftables（工具会自动检测并安装）
-- systemd（用于开机自启，可选）
-- root 权限（操作 nftables 需要）
+- Linux 内核 >= 3.13
+- nftables（`install` 命令自动检测并安装）
+- systemd（可选，用于开机自启）
+- root 权限
 
 ## 快速开始
 
 ```bash
-# 1. 克隆或复制本项目到目标服务器
+# 1. 部署到服务器
 cd /opt/nftablestool
-
-# 2. 赋予执行权限
 chmod +x nftables-tool.sh
 
-# 3. 安装 nftables（如果系统未安装）
+# 2. 安装 nftables（未安装时自动检测包管理器）
 sudo ./nftables-tool.sh install
 
-# 4. 初始化安全基线
+# 3. 初始化表结构（input 默认 accept，零干扰）
 sudo ./nftables-tool.sh init
 
-# 5. 查看可用模板
+# 4. 查看可用模板
 ./nftables-tool.sh template list
 
-# 6. 添加白名单：允许 10.0.1.0/24 网段访问 MongoDB
+# 5. 添加白名单：仅允许 10.0.1.0/24 访问 MongoDB
 sudo ./nftables-tool.sh allow mongodb 10.0.1.0/24
 
-# 7. 查看当前规则
+# 6. 添加白名单：允许集群内网访问 SeaweedFS 全组件
+sudo ./nftables-tool.sh allow seaweedfs 10.0.0.0/16
+
+# 7. 查看规则
 ./nftables-tool.sh list
+./nftables-tool.sh status
 ```
 
 ## 命令参考
@@ -65,17 +73,20 @@ sudo ./nftables-tool.sh init
 ```
 
 ### `allow <template> <ip[/mask]>`
-允许指定 IP 地址或网段访问模板对应的中间件端口。支持 CIDR 格式。
+允许指定 IP 地址或网段访问模板对应的端口。支持 CIDR 格式。模板定义的所有端口（含范围）通过一个端口集合统一管理，input 链仅追加一条跳转规则。
 
 ```bash
-# 允许单个 IP
+# 单个 IP
 sudo ./nftables-tool.sh allow redis 192.168.0.5
 
-# 允许整个网段
+# CIDR 网段
 sudo ./nftables-tool.sh allow mongodb 10.0.1.0/24
 
-# 多端口模板（自动为所有端口添加规则）
+# 模板包含端口范围时，自动处理（如 seaweedfs: 9333, 8080-8180, 8888）
 sudo ./nftables-tool.sh allow seaweedfs 10.0.0.0/16
+
+# 全开放（0.0.0.0/0），适用于不需要限制的组件
+sudo ./nftables-tool.sh allow seaweedfs-volume 0.0.0.0/0
 ```
 
 ### `deny <template> <ip[/mask]>`
@@ -123,75 +134,93 @@ sudo ./nftables-tool.sh reset
 |--------|------|------|
 | `mongodb` | 27017 | MongoDB 数据库 |
 | `redis` | 6379 | Redis 缓存 |
-| `seaweedfs` | 9333, 8080, 8888 | SeaweedFS（全组件合一） |
-| `seaweedfs-master` | 9333 | SeaweedFS Master 节点 |
-| `seaweedfs-volume` | 8080 | SeaweedFS Volume 服务器 |
-| `seaweedfs-filer` | 8888 | SeaweedFS Filer 服务器 |
+| `seaweedfs` | 9333, 8080-8180, 8888 | SeaweedFS 分布式文件系统（master/volume/filer） |
 | `mysql` | 3306 | MySQL / MariaDB |
 | `postgresql` | 5432 | PostgreSQL |
-| `elasticsearch` | 9200, 9300 | Elasticsearch（HTTP + transport） |
-| `kafka` | 9092, 9093 | Apache Kafka |
-| `zookeeper` | 2181, 2888, 3888 | Apache ZooKeeper |
-| `consul` | 8300, 8301, 8302, 8500, 8600 | HashiCorp Consul |
-| `etcd` | 2379, 2380 | etcd 键值存储 |
+| `elasticsearch` | 9200, 9300 | Elasticsearch（HTTP API + transport） |
+| `kafka` | 9092, 9093 | Apache Kafka（plain + SSL） |
+| `zookeeper` | 2181, 2888, 3888 | Apache ZooKeeper（client/peer/leader） |
+| `consul` | 8300, 8301, 8302, 8500, 8600 | HashiCorp Consul（RPC/serf/HTTP/DNS） |
+| `etcd` | 2379, 2380 | etcd 键值存储（client + peer） |
 
-> 💡 **多端口中间件拆分策略**：像 SeaweedFS 这种不同端口有不同安全需求的中间件，我们提供了按组件拆分的子模板。你可以对不同端口设置不同的白名单策略。其他多端口模板（Elasticsearch、ZooKeeper 等）也可参考 `custom.conf.example` 自行创建子模板。
+> 💡 **端口范围支持**：`.conf` 模板的 `PORTS` 支持端口范围语法（如 `8080-8180`），nftables `inet_service` 类型原生处理。SeaweedFS 的 volume 端口已使用范围表示。
 
 ## 自定义模板
 
 在 `templates/` 目录下创建 `.conf` 文件即可。参考 `templates/custom.conf.example`：
 
 ```bash
-# my-service.conf
-NAME="My Service"
-DESCRIPTION="我的自定义服务"
-PORTS=("8080" "9090")
+# my-cluster.conf — 使用端口范围的集群模板
+NAME="My App Cluster"
+DESCRIPTION="应用集群（HTTP + 动态端口池）"
+PORTS=("443" "8000-9000")
 PROTOCOL="tcp"
 ```
 
 创建后即可直接使用：
 
 ```bash
-sudo ./nftables-tool.sh allow my-service 10.0.1.0/24
+sudo ./nftables-tool.sh allow my-cluster 10.0.1.0/24
 ```
+
+> 💡 **按组件拆分**：如果同一中间件的不同端口需要不同白名单策略，创建多个子模板即可。例如对 SeaweedFS 分别建 `seaweedfs-filer.conf`（`PORTS=("8888")`）和 `seaweedfs-volume.conf`（`PORTS=("8080-8180")`），各自独立管理。
 
 ## nftables 结构
 
 ```
 table inet nftables-tool {
     chain input {
-        type filter hook input priority 0; policy accept;   # ← 默认放行，最小干扰
-        # 仅拦截已声明的端口
-        tcp dport 27017 jump mongodb_chain
-        tcp dport 6379  jump redis_chain
-        tcp dport 8888  jump seaweedfs-filer_chain
-        # 未匹配的流量：policy accept → 交给系统其他规则处理
+        type filter hook input priority 0; policy accept;
+        # 每条跳转规则引用一个端口集合（ipset 风格）
+        tcp dport @mongodb_ports   jump mongodb_chain
+        tcp dport @seaweedfs_ports jump seaweedfs_chain
+        # 未命中任何 dport → policy accept → 放行，不干扰其他规则
     }
 
-    chain mongodb_chain {
-        ip saddr @mongodb_allow accept   # 白名单 IP → 放行
-        reject                            # 非白名单 IP → 拒绝
+    chain seaweedfs_chain {
+        ip saddr @seaweedfs_allow accept   # IP 在白名单 → 放行
+        reject                              # 其余 → 拒绝
     }
 
-    set mongodb_allow {
+    set seaweedfs_allow {                   # IP 白名单集合
         type ipv4_addr
-        elements = { 10.0.1.0/24 }
+        elements = { 10.0.0.0/16 }
+    }
+
+    set seaweedfs_ports {                   # 端口集合（含范围）
+        type inet_service
+        elements = { 8888, 9333, 8080-8180 }
     }
 }
 ```
 
-与 iptables `-j RETURN` 的对应关系：
+### 流量路径
 
-| iptables 模式 | nftables 等价 |
+```
+入站请求
+  │
+  ▼
+input chain (policy accept)
+  │
+  ├─ dport ∈ @seaweedfs_ports？ → jump seaweedfs_chain
+  │   ├─ saddr ∈ @seaweedfs_allow？ → accept ✓
+  │   └─ 否 → reject ✗
+  │
+  └─ dport 不在任何端口集合中 → policy accept → 放行（交给系统其他规则）
+```
+
+### 与 iptables 对标
+
+| iptables | nftables 等价 |
 |---|---|
-| `-j ACCEPT` | 规则末尾 `accept` |
-| `-j DROP` | 规则末尾 `drop` 或 `reject` |
-| `-j RETURN` | 不匹配任何规则，回退到 chain policy（本工具设为 `accept`） |
+| `-m set --match-set IPS src -j ACCEPT` | `ip saddr @xxx_allow accept` |
+| `-m set --match-set PORTS dst -j DROP` | `tcp dport @xxx_ports jump xxx_chain` → `reject` |
+| `-j RETURN` | 不命中任何规则 → `policy accept` |
 
 ## 注意事项
 
-- 所有需要修改防火墙规则的操作均需 root 权限（sudo）
-- `init` 初次执行时默认放行 SSH（22 端口），避免远程连接中断
-- 规则自动持久化到 `/etc/nftables.conf`，重启后保留
-- 本工具使用独立表 `inet nftables-tool`，不会影响系统已有的 nftables 规则
-- `reset` 仅删除本工具的表，其他表不受影响
+- 所有修改防火墙的操作需要 root 权限（`sudo`）
+- `init` 不会添加任何 allow/deny 规则，仅创建空表框架
+- `allow` / `deny` 操作后自动持久化到 `/etc/nftables.conf`，重启保留
+- `reset` 仅删除 `inet nftables-tool` 表，不影响系统其他 nftables/iptables 规则
+- 模板文件位置：`templates/*.conf`，命名即模板名（不含 `.conf` 后缀）

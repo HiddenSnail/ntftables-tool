@@ -4,13 +4,19 @@
 # 字段说明:
 #   NAME        - 模板显示名称（用于日志输出，无实际作用）
 #   DESCRIPTION - 模板描述信息
-#   PORTS       - 端口列表，格式：("port1" "port2" ...)
+#   PORTS       - 端口列表，支持单个端口和范围，如 ("8080" "8000-9000")
 #   PROTOCOL    - 协议类型：tcp / udp
 #
-# 示例：自定义 API 网关
+# 示例 1：自定义 API 网关（离散端口）
 # NAME="My API Gateway"
 # DESCRIPTION="Custom API Gateway (HTTP + gRPC)"
 # PORTS=("8080" "9090")
+# PROTOCOL="tcp"
+#
+# 示例 2：端口范围（如动态端口池）
+# NAME="My App Cluster"
+# DESCRIPTION="Application cluster (dynamic port range)"
+# PORTS=("8000-9000" "443")
 # PROTOCOL="tcp"
 
 NAME="Custom Service"

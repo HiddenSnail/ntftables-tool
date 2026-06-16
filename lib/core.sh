@@ -200,6 +200,7 @@ cmd_allow() {
 
     local chain_name="${template_name}_chain"
     local set_name="${template_name}_allow"
+    local port_set_name="${template_name}_ports"
 
     log_info "正在为 ${NAME}（${template_name}）添加白名单: $ip_range"
 
@@ -222,14 +223,19 @@ cmd_allow() {
         nft add set "$TABLE" "$set_name" '{ type ipv4_addr; }'
     fi
 
-    # 3. 为每个端口在 input 链中添加跳转规则（幂等）
+    # 3. 创建端口集合 + 添加端口元素 + 一条 set 引用跳转规则（幂等）
+    if ! _set_exists "$port_set_name"; then
+        log_step "创建端口集合: $port_set_name"
+        nft add set "$TABLE" "$port_set_name" '{ type inet_service; }'
+    fi
     for port in "${PORTS[@]}"; do
-        if ! nft list chain "$TABLE" input 2>/dev/null | grep -q "tcp dport $port jump $chain_name"; then
-            log_step "添加端口 $port 的跳转规则: input -> $chain_name"
-            nft add rule "$TABLE" input tcp dport "$port" jump "$chain_name" \
-                comment "\"${NAME} whitelist\""
-        fi
+        nft add element "$TABLE" "$port_set_name" "{ $port }" 2>/dev/null || true
     done
+    if ! nft list chain "$TABLE" input 2>/dev/null | grep -q "dport @${port_set_name} jump $chain_name"; then
+        log_step "添加跳转规则: input -> $chain_name (端口集 @${port_set_name})"
+        nft add rule "$TABLE" input tcp dport "@${port_set_name}" jump "$chain_name" \
+            comment "\"${NAME} whitelist\""
+    fi
 
     # 4. 确保中间件链内有 accept + reject 规则（幂等）
     if ! nft list chain "$TABLE" "$chain_name" 2>/dev/null | grep -q "ip saddr @${set_name} accept"; then
@@ -297,6 +303,7 @@ cmd_deny() {
         log_info "如需清理对应链和规则，请手动执行:"
         log_info "  nft delete chain $TABLE $chain_name"
         log_info "  nft delete set $TABLE $set_name"
+        log_info "  nft delete set $TABLE ${template_name}_ports"
     fi
 
     _save_rules
@@ -346,12 +353,15 @@ cmd_list() {
         echo ""
         echo "── ${display_name} ──"
         echo "   端口: "
-        # 从 input 链中找跳转规则
-        nft list chain "$TABLE" input 2>/dev/null | grep "jump ${s}_chain" | while read -r line; do
-            local port
-            port=$(echo "$line" | grep -oP 'dport \K[0-9]+')
-            echo "     - $port"
-        done
+        # 从端口集合中读取
+        local port_set="${s}_ports"
+        if nft list set "$TABLE" "$port_set" &>/dev/null; then
+            nft list set "$TABLE" "$port_set" 2>/dev/null | grep -oP '^\s+\K[0-9]+(-[0-9]+)?' | while read -r p; do
+                echo "     - $p"
+            done
+        else
+            echo "     (未配置)"
+        fi
 
         echo "   白名单 IP:"
         local elements

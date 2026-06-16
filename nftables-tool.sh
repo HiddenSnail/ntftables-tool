@@ -4,7 +4,7 @@
 #
 # 用法:
 #   ./nftables-tool.sh install                    检测并安装 nftables
-#   ./nftables-tool.sh init                       初始化安全基线与表结构
+#   ./nftables-tool.sh init                       初始化表结构（input 默认 accept，零干扰）
 #   ./nftables-tool.sh template list               列出可用模板
 #   ./nftables-tool.sh template show <name>         查看模板详情
 #   ./nftables-tool.sh allow <template> <ip[/mask]> 白名单 IP 访问指定中间件
@@ -38,7 +38,7 @@ nftables-tool — nftables IP 白名单端口访问控制工具
 
 命令:
   install                        检测并自动安装 nftables（需要 root）
-  init                           初始化表结构、安全基线与开机自启（需要 root）
+  init                           初始化表结构（input 默认 accept，最小干扰，需要 root）
 
   template list                  列出所有可用中间件模板
   template show <name>           查看指定模板的端口与协议信息
