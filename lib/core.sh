@@ -1,0 +1,476 @@
+#!/usr/bin/env bash
+#===============================================================================
+# core.sh - nftables 规则核心管理
+# 提供：init, allow, deny, list, status, save, reset
+#===============================================================================
+
+# 依赖 common.sh，由主入口 source 引入
+
+readonly TABLE="inet nftables-tool"
+
+# =============================================================================
+# 内部辅助函数
+# =============================================================================
+
+# 检查表是否存在
+_table_exists() {
+    nft list tables 2>/dev/null | grep -qF "$TABLE"
+}
+
+# 检查链是否存在
+_chain_exists() {
+    local chain="$1"
+    nft list chain "$TABLE" "$chain" &>/dev/null
+}
+
+# 检查 set 是否存在
+_set_exists() {
+    local set_name="$1"
+    nft list set "$TABLE" "$set_name" &>/dev/null
+}
+
+# 将模板端口数组转为 nftables 集合格式 { 80, 443 }
+_ports_to_nft_set() {
+    local ports=("$@")
+    local result="{ "
+    local first=true
+    for p in "${ports[@]}"; do
+        if $first; then
+            result+="$p"
+            first=false
+        else
+            result+=", $p"
+        fi
+    done
+    result+=" }"
+    echo "$result"
+}
+
+# 从 nft 链中提取已存在的 handle 号（用于删除规则时使用）
+_get_rule_handles() {
+    local chain="$1"
+    local pattern="$2"
+    nft -a list chain "$TABLE" "$chain" 2>/dev/null | grep "$pattern" | awk '{print $NF}' || true
+}
+
+# 保存规则到 /etc/nftables.conf
+_save_rules() {
+    log_step "持久化规则到 /etc/nftables.conf..."
+    nft list ruleset > /etc/nftables.conf
+    log_info "规则已保存。"
+}
+
+# =============================================================================
+# cmd_init - 初始化表结构、安全基线、开机自启
+# =============================================================================
+cmd_init() {
+    check_root
+
+    log_info "正在初始化 nftables 白名单工具..."
+
+    # 1. 确保 nftables 已安装且服务已运行
+    ensure_nftables
+
+    # 2. 创建表（幂等：已存在则忽略错误）
+    if ! _table_exists; then
+        log_step "创建表 $TABLE ..."
+        nft add table "$TABLE"
+    else
+        log_info "表 $TABLE 已存在，跳过创建。"
+    fi
+
+    # 3. 创建 input 链（policy accept：仅管理已声明端口，其余放行不干扰其他规则）
+    if ! _chain_exists "input"; then
+        log_step "创建 input 链（默认 ACCEPT）..."
+        nft add chain "$TABLE" input \
+            '{ type filter hook input priority 0; policy accept; }'
+    else
+        log_info "input 链已存在。"
+    fi
+
+    # 4. 创建 output 链（放行）
+    if ! _chain_exists "output"; then
+        log_step "创建 output 链..."
+        nft add chain "$TABLE" output \
+            '{ type filter hook output priority 0; policy accept; }'
+    else
+        log_info "output 链已存在。"
+    fi
+
+    # 5. 安全基线规则（可选，默认 policy accept 已保证最小干扰）
+    #    _add_baseline_rules 仅在需要显式加固时手动调用
+    #    ── 以下注释掉，不再自动添加 loopback/established/SSH/ICMP 规则 ──
+    # _add_baseline_rules
+
+    # 6. 持久化并确保开机自启
+    _save_rules
+    _enable_nftables_service
+
+    log_info "============================================"
+    log_info "初始化完成！表结构如下："
+    log_info "============================================"
+    nft list table "$TABLE" 2>/dev/null || true
+}
+
+_add_baseline_rules() {
+    local chain_input="input"
+
+    # 检查并添加 loopback 放行
+    if ! nft list chain "$TABLE" "$chain_input" 2>/dev/null | grep -q "iif.*lo.*accept"; then
+        nft add rule "$TABLE" "$chain_input" iif lo accept comment \"Allow loopback\"
+    fi
+
+    # 检查并添加 established/related 放行
+    if ! nft list chain "$TABLE" "$chain_input" 2>/dev/null | grep -q "ct state.*established"; then
+        nft add rule "$TABLE" "$chain_input" ct state established,related accept \
+            comment \"Allow established connections\"
+    fi
+
+    # 检查并添加 ICMP 放行
+    if ! nft list chain "$TABLE" "$chain_input" 2>/dev/null | grep -q "icmp type.*echo-request.*accept"; then
+        nft add rule "$TABLE" "$chain_input" icmp type echo-request accept \
+            comment \"Allow ping\"
+        nft add rule "$TABLE" "$chain_input" icmpv6 type echo-request accept \
+            comment \"Allow ping IPv6\"
+    fi
+
+    # 检查并添加 SSH 放行（防止 lockout）
+    if ! nft list chain "$TABLE" "$chain_input" 2>/dev/null | grep -q "tcp dport 22 accept"; then
+        nft add rule "$TABLE" "$chain_input" tcp dport 22 accept \
+            comment \"Allow SSH\"
+        log_info "SSH (22) 已默认放行，防止远程管理被锁。"
+    fi
+}
+
+# =============================================================================
+# cmd_template - 模板管理
+# =============================================================================
+cmd_template() {
+    local sub="$1"
+    shift || true
+
+    case "$sub" in
+        list)
+            echo ""
+            echo "可用模板:"
+            echo "---------"
+            list_available_templates
+            echo ""
+            echo "自定义模板: 将 .conf 文件放入 ${SCRIPT_DIR}/templates/ 目录即可。"
+            echo "参考示例:   ${SCRIPT_DIR}/templates/custom.conf.example"
+            ;;
+
+        show)
+            if [ $# -lt 1 ]; then
+                log_error "用法: nftables-tool.sh template show <name>"
+                exit 1
+            fi
+            local name="$1"
+            validate_template_name "$name"
+            load_template "$name"
+
+            echo ""
+            echo "模板详情: ${name}"
+            echo "-----------------------------"
+            echo "名称:     ${NAME}"
+            echo "描述:     ${DESCRIPTION}"
+            echo "协议:     ${PROTOCOL}"
+            echo "端口:     ${PORTS[*]}"
+            echo ""
+            ;;
+
+        *)
+            log_error "用法: nftables-tool.sh template {list|show <name>}"
+            exit 1
+            ;;
+    esac
+}
+
+# =============================================================================
+# cmd_allow - 白名单 IP 访问指定模板的端口
+# =============================================================================
+cmd_allow() {
+    local template_name="$1"
+    local ip_range="$2"
+
+    check_root
+    validate_template_name "$template_name"
+    validate_ip_range "$ip_range"
+    load_template "$template_name"
+
+    local chain_name="${template_name}_chain"
+    local set_name="${template_name}_allow"
+
+    log_info "正在为 ${NAME}（${template_name}）添加白名单: $ip_range"
+
+    # 确保表存在
+    if ! _table_exists; then
+        log_error "表 $TABLE 不存在，请先执行 init。"
+        log_info "运行: sudo ./nftables-tool.sh init"
+        exit 1
+    fi
+
+    # 1. 创建中间件链（幂等）
+    if ! _chain_exists "$chain_name"; then
+        log_step "创建链: $chain_name"
+        nft add chain "$TABLE" "$chain_name"
+    fi
+
+    # 2. 创建 IP 白名单 set（幂等）
+    if ! _set_exists "$set_name"; then
+        log_step "创建 IP 白名单集合: $set_name"
+        nft add set "$TABLE" "$set_name" '{ type ipv4_addr; }'
+    fi
+
+    # 3. 为每个端口在 input 链中添加跳转规则（幂等）
+    for port in "${PORTS[@]}"; do
+        if ! nft list chain "$TABLE" input 2>/dev/null | grep -q "tcp dport $port jump $chain_name"; then
+            log_step "添加端口 $port 的跳转规则: input -> $chain_name"
+            nft add rule "$TABLE" input tcp dport "$port" jump "$chain_name" \
+                comment "\"${NAME} whitelist\""
+        fi
+    done
+
+    # 4. 确保中间件链内有 accept + reject 规则（幂等）
+    if ! nft list chain "$TABLE" "$chain_name" 2>/dev/null | grep -q "ip saddr @${set_name} accept"; then
+        nft add rule "$TABLE" "$chain_name" ip saddr "@${set_name}" accept \
+            comment "\"Allowed ${NAME} clients\""
+    fi
+    if ! nft list chain "$TABLE" "$chain_name" 2>/dev/null | grep -q "reject"; then
+        nft add rule "$TABLE" "$chain_name" reject \
+            comment "\"Reject other ${NAME} traffic\""
+    fi
+
+    # 5. 添加 IP 到白名单集合
+    log_step "添加 $ip_range 到白名单集合 $set_name"
+    nft add element "$TABLE" "$set_name" "{ $ip_range }" 2>/dev/null || {
+        log_warn "$ip_range 可能已在白名单中。"
+    }
+
+    # 6. 持久化
+    _save_rules
+
+    log_info "✓ ${NAME} 白名单已更新。"
+    log_info "  当前白名单:"
+    nft list set "$TABLE" "$set_name" 2>/dev/null | grep -E '^\s+elements' || echo "  (空)"
+}
+
+# =============================================================================
+# cmd_deny - 移除 IP 白名单
+# =============================================================================
+cmd_deny() {
+    local template_name="$1"
+    local ip_range="$2"
+
+    check_root
+    validate_template_name "$template_name"
+    validate_ip_range "$ip_range"
+    load_template "$template_name"
+
+    local set_name="${template_name}_allow"
+    local chain_name="${template_name}_chain"
+
+    log_info "正在从 ${NAME} 白名单中移除: $ip_range"
+
+    if ! _table_exists; then
+        log_error "表 $TABLE 不存在，无需操作。"
+        exit 0
+    fi
+
+    if ! _set_exists "$set_name"; then
+        log_warn "白名单集合 $set_name 不存在，无需操作。"
+        exit 0
+    fi
+
+    # 移除 IP
+    if nft delete element "$TABLE" "$set_name" "{ $ip_range }" 2>/dev/null; then
+        log_info "✓ 已从 ${NAME} 白名单移除: $ip_range"
+    else
+        log_warn "$ip_range 不在白名单中，无需移除。"
+    fi
+
+    # 检查集合是否为空，提示用户清理
+    local remaining
+    remaining=$(nft list set "$TABLE" "$set_name" 2>/dev/null | grep -cE '^\s+[0-9]' || echo "0")
+    if [ "$remaining" -eq 0 ]; then
+        log_warn "${NAME} 白名单已为空。"
+        log_info "如需清理对应链和规则，请手动执行:"
+        log_info "  nft delete chain $TABLE $chain_name"
+        log_info "  nft delete set $TABLE $set_name"
+    fi
+
+    _save_rules
+}
+
+# =============================================================================
+# cmd_list - 列出白名单规则
+# =============================================================================
+cmd_list() {
+    local filter="$1"
+
+    echo ""
+    echo "============================================"
+    echo "  nftables-tool 白名单规则"
+    echo "============================================"
+
+    if ! _table_exists; then
+        echo "  表 $TABLE 不存在，请先执行 init。"
+        echo "  运行: sudo ./nftables-tool.sh init"
+        echo ""
+        return
+    fi
+
+    # 查找所有 _allow 集合
+    local sets
+    sets=$(nft list sets "$TABLE" 2>/dev/null | grep -oP '\S+(?=_allow)' | sort -u || true)
+
+    if [ -z "$sets" ]; then
+        echo "  暂无白名单规则。"
+        echo ""
+        return
+    fi
+
+    for s in $sets; do
+        local set_full="${s}_allow"
+        # 如果指定了过滤且不匹配，跳过
+        if [ -n "$filter" ] && [ "$s" != "$filter" ]; then
+            continue
+        fi
+
+        # 尝试加载模板获取显示名称
+        local display_name="$s"
+        if load_template "$s" 2>/dev/null; then
+            display_name="${NAME} (${s})"
+        fi
+
+        echo ""
+        echo "── ${display_name} ──"
+        echo "   端口: "
+        # 从 input 链中找跳转规则
+        nft list chain "$TABLE" input 2>/dev/null | grep "jump ${s}_chain" | while read -r line; do
+            local port
+            port=$(echo "$line" | grep -oP 'dport \K[0-9]+')
+            echo "     - $port"
+        done
+
+        echo "   白名单 IP:"
+        local elements
+        elements=$(nft list set "$TABLE" "$set_full" 2>/dev/null | grep -oP '^\s+\K[0-9.]+(?:/[0-9]+)?' || true)
+        if [ -z "$elements" ]; then
+            echo "     (空)"
+        else
+            echo "$elements" | while read -r ip; do
+                echo "     - $ip"
+            done
+        fi
+    done
+
+    echo ""
+}
+
+# =============================================================================
+# cmd_status - 运行状态
+# =============================================================================
+cmd_status() {
+    echo ""
+    echo "============================================"
+    echo "  nftables-tool 状态"
+    echo "============================================"
+    echo ""
+
+    # nft 命令
+    if nft_available; then
+        echo "nft 版本:   $(nft --version 2>&1 | head -1)"
+    else
+        echo "nft 状态:   ✗ 未安装"
+        echo "运行 'sudo ./nftables-tool.sh install' 安装。"
+        echo ""
+        return
+    fi
+
+    # 服务状态
+    if command -v systemctl &>/dev/null; then
+        if systemctl is-active --quiet nftables 2>/dev/null; then
+            echo "服务状态:   ✓ 运行中"
+            if systemctl is-enabled --quiet nftables 2>/dev/null; then
+                echo "开机自启:   ✓ 已启用"
+            else
+                echo "开机自启:   ✗ 未启用"
+            fi
+        else
+            echo "服务状态:   ✗ 未运行"
+        fi
+    fi
+
+    # 工具表状态
+    if _table_exists; then
+        echo ""
+        echo "工具表:     ✓ $TABLE 存在"
+
+        # 统计集合数
+        local set_count
+        set_count=$(nft list sets "$TABLE" 2>/dev/null | grep -c "set " || echo "0")
+        echo "白名单集:   $set_count 个"
+
+        # 逐个集合统计 IP 数
+        local sets
+        sets=$(nft list sets "$TABLE" 2>/dev/null | grep -oP '\S+(?=_allow)' | sort -u || true)
+        if [ -n "$sets" ]; then
+            echo ""
+            echo "各集合 IP 数量:"
+            for s in $sets; do
+                local count
+                count=$(nft list set "$TABLE" "${s}_allow" 2>/dev/null | grep -cE '^\s+[0-9]' || echo "0")
+                echo "  - ${s}: ${count} 个 IP"
+            done
+        fi
+    else
+        echo ""
+        echo "工具表:     ✗ $TABLE 不存在"
+        echo "运行 'sudo ./nftables-tool.sh init' 初始化。"
+    fi
+
+    echo ""
+}
+
+# =============================================================================
+# cmd_save - 持久化规则
+# =============================================================================
+cmd_save() {
+    check_root
+    _save_rules
+}
+
+# =============================================================================
+# cmd_reset - 清除本工具所有规则
+# =============================================================================
+cmd_reset() {
+    check_root
+
+    echo ""
+    if ! _table_exists; then
+        log_info "表 $TABLE 不存在，无需清除。"
+        echo ""
+        return
+    fi
+
+    log_warn "即将删除以下所有规则:"
+    nft list table "$TABLE" 2>/dev/null || true
+    echo ""
+
+    # 简单确认（非交互模式下直接执行）
+    if [ -t 0 ]; then
+        read -r -p "确认删除? 输入 yes 继续: " confirm
+        if [ "$confirm" != "yes" ]; then
+            log_info "已取消。"
+            return
+        fi
+    fi
+
+    log_step "删除表 $TABLE ..."
+    nft delete table "$TABLE"
+    _save_rules
+
+    log_info "✓ 已清除 nftables-tool 的所有规则。"
+    echo ""
+}
