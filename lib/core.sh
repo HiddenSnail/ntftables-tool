@@ -342,9 +342,9 @@ cmd_list() {
         return 0
     fi
 
-    # 查找所有 _allow 集合（nft list sets 不接受 table 参数，改用 list table）
+    # 查找所有 _allow 集合（仅匹配 set 定义行，避免误匹配规则体中的 @xxx_allow 引用）
     local sets
-    sets=$(nft list table "$TABLE" 2>/dev/null | grep -oE '\S+_allow' | sed 's/_allow$//' | sort -u || true)
+    sets=$(nft list table "$TABLE" 2>/dev/null | grep -oE 'set \S+_allow' | awk '{print $2}' | sed 's/_allow$//' | sort -u || true)
 
     if [ -z "$sets" ]; then
         echo "  暂无白名单规则。"
@@ -439,9 +439,9 @@ cmd_status() {
         set_count=$(nft list table "$TABLE" 2>/dev/null | grep -c "set " || echo "0")
         echo "白名单集:   $set_count 个"
 
-        # 逐个集合统计 IP 数
+        # 逐个集合统计 IP 数（仅匹配 set 定义行，避免误匹配规则体中的 @xxx_allow 引用）
         local sets
-        sets=$(nft list table "$TABLE" 2>/dev/null | grep -oE '\S+_allow' | sed 's/_allow$//' | sort -u || true)
+        sets=$(nft list table "$TABLE" 2>/dev/null | grep -oE 'set \S+_allow' | awk '{print $2}' | sed 's/_allow$//' | sort -u || true)
         if [ -n "$sets" ]; then
             echo ""
             echo "各集合 IP 数量:"
