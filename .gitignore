@@ -1,0 +1,22 @@
+# ====== 打包产物 ======
+/output/
+
+# ====== macOS ======
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ====== 编辑器 / IDE ======
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+\#*\#
+
+# ====== 测试临时文件 ======
+/tmp/
+
+# ====== Shell 相关 ======
+*.bak

@@ -143,7 +143,7 @@ teardown() {
     run bash "$TOOL" allow redis 10.0.1.0/24
     [ "$status" -eq 0 ]
 
-    run bash "$TOOL" allow seaweedfs 10.0.0.0/16
+    run bash "$TOOL" allow test-range 10.0.0.0/16
     [ "$status" -eq 0 ]
 
     # list 验证

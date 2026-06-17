@@ -230,13 +230,13 @@ cmd_allow() {
     # 2. 创建 IP 白名单 set（幂等）
     if ! _set_exists "$set_name"; then
         log_step "创建 IP 白名单集合: $set_name"
-        nft add set "$TABLE" "$set_name" '{ type ipv4_addr; }'
+        nft add set "$TABLE" "$set_name" '{ type ipv4_addr; flags interval; }'
     fi
 
     # 3. 创建端口集合 + 添加端口元素 + 一条 set 引用跳转规则（幂等）
     if ! _set_exists "$port_set_name"; then
         log_step "创建端口集合: $port_set_name"
-        nft add set "$TABLE" "$port_set_name" '{ type inet_service; }'
+        nft add set "$TABLE" "$port_set_name" '{ type inet_service; flags interval; }'
     fi
     for port in "${PORTS[@]}"; do
         nft add element "$TABLE" "$port_set_name" "{ $port }" 2>/dev/null || true
@@ -342,9 +342,9 @@ cmd_list() {
         return 0
     fi
 
-    # 查找所有 _allow 集合
+    # 查找所有 _allow 集合（nft list sets 不接受 table 参数，改用 list table）
     local sets
-    sets=$(nft list sets "$TABLE" 2>/dev/null | grep -oE '\S+_allow' | sed 's/_allow$//' | sort -u || true)
+    sets=$(nft list table "$TABLE" 2>/dev/null | grep -oE '\S+_allow' | sed 's/_allow$//' | sort -u || true)
 
     if [ -z "$sets" ]; then
         echo "  暂无白名单规则。"
@@ -434,14 +434,14 @@ cmd_status() {
         echo ""
         echo "工具表:     ✓ $TABLE 存在"
 
-        # 统计集合数
+        # 统计集合数（nft list sets 不接受 table 参数，改用 list table）
         local set_count
-        set_count=$(nft list sets "$TABLE" 2>/dev/null | grep -c "set " || echo "0")
+        set_count=$(nft list table "$TABLE" 2>/dev/null | grep -c "set " || echo "0")
         echo "白名单集:   $set_count 个"
 
         # 逐个集合统计 IP 数
         local sets
-        sets=$(nft list sets "$TABLE" 2>/dev/null | grep -oE '\S+_allow' | sed 's/_allow$//' | sort -u || true)
+        sets=$(nft list table "$TABLE" 2>/dev/null | grep -oE '\S+_allow' | sed 's/_allow$//' | sort -u || true)
         if [ -n "$sets" ]; then
             echo ""
             echo "各集合 IP 数量:"

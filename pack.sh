@@ -15,8 +15,9 @@ cd "$SCRIPT_DIR"
 
 VERSION="${VERSION:-$(date +%Y%m%d)}"
 PACK_NAME="nftables-tool"
-OUTPUT="${PACK_NAME}-${VERSION}.tar.gz"
-SINGLE_OUTPUT="${PACK_NAME}-${VERSION}.sh"
+OUTPUT_DIR="output"
+OUTPUT="${OUTPUT_DIR}/${PACK_NAME}-${VERSION}.tar.gz"
+SINGLE_OUTPUT="${OUTPUT_DIR}/${PACK_NAME}-${VERSION}.sh"
 DO_TEST=false
 DO_SINGLE=false
 
@@ -54,6 +55,8 @@ fi
 # ---- 打包 tar.gz ----
 echo ""
 echo "=== 打包: ${OUTPUT} ==="
+
+mkdir -p "$OUTPUT_DIR"
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT

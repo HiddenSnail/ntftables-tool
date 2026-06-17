@@ -84,11 +84,18 @@ template_names() {
     [ "${PORTS[0]}" = "6379" ]
 }
 
-@test "seaweedfs: 端口含范围 8080-8180" {
+@test "seaweedfs: 端口含范围 9080-9180" {
     SCRIPT_DIR="$PROJECT_DIR"
     load_template "seaweedfs"
     [ "${#PORTS[@]}" -eq 3 ]
-    [[ "${PORTS[*]}" == *"8080-8180"* ]]
+    [[ "${PORTS[*]}" == *"9080-9180"* ]]
+}
+
+@test "test-range: 独立测试模板含范围端口 2000-3000" {
+    SCRIPT_DIR="$PROJECT_DIR"
+    load_template "test-range"
+    [ "${#PORTS[@]}" -eq 3 ]
+    [[ "${PORTS[*]}" == *"2000-3000"* ]]
 }
 
 @test "consul: 5 个端口" {

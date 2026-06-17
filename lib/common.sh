@@ -117,7 +117,8 @@ detect_os() {
 
 # ---- nft 命令检测 ----
 nft_available() {
-    [ "$NFT_DRY_RUN" = "true" ] || [ -n "${NFT_MOCK_DIR:-}" ] || command -v nft &>/dev/null
+    # 注意：不可用 command -v nft，那会找到同文件中定义的 nft() shell 函数
+    [ "$NFT_DRY_RUN" = "true" ] || [ -n "${NFT_MOCK_DIR:-}" ] || type -P nft &>/dev/null
 }
 
 # ---- nftables 服务检测 ----

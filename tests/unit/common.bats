@@ -72,8 +72,17 @@ load ../test_helper.bash
     load_template "seaweedfs"
     [ "$NAME" = "SeaweedFS" ]
     [ "${PORTS[0]}" = "9333" ]
-    [ "${PORTS[1]}" = "8080-8180" ]
+    [ "${PORTS[1]}" = "9080-9180" ]
     [ "${PORTS[2]}" = "8888" ]
+}
+
+@test "load_template: 独立测试模板含范围端口" {
+    SCRIPT_DIR="$PROJECT_DIR"
+    load_template "test-range"
+    [ "$NAME" = "Test Range Service" ]
+    [ "${PORTS[0]}" = "1000" ]
+    [ "${PORTS[1]}" = "2000-3000" ]
+    [ "${PORTS[2]}" = "4000" ]
 }
 
 @test "load_template: 不存在的模板返回 1" {
@@ -90,6 +99,15 @@ load ../test_helper.bash
     NFT_DRY_RUN="true"
     run nft_available
     [ "$status" -eq 0 ]
+}
+
+@test "nft_available: 使用 type -P 而非 command -v 检测 nft 二进制" {
+    # command -v 会找到同名的 nft() shell 函数导致永远返回 true
+    # 正确做法是用 type -P 强制 PATH 搜索，忽略函数/别名
+    local func_body
+    func_body=$(declare -f nft_available)
+    [[ "$func_body" == *"type -P nft"* ]]
+    [[ "$func_body" != *"command -v nft"* ]]
 }
 
 # =============================================================================

@@ -98,15 +98,41 @@ teardown() {
 }
 
 @test "cmd_allow: 端口范围正确存储" {
-    run cmd_allow "seaweedfs" "10.0.0.0/16"
+    run cmd_allow "test-range" "10.0.0.0/16"
 
     [ "$status" -eq 0 ]
 
-    run mock_set_elements "inet nftables-tool" "seaweedfs_ports"
+    run mock_set_elements "inet nftables-tool" "test-range_ports"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"8080-8180"* ]]
-    [[ "$output" == *"9333"* ]]
-    [[ "$output" == *"8888"* ]]
+    [[ "$output" == *"2000-3000"* ]]
+    [[ "$output" == *"1000"* ]]
+    [[ "$output" == *"4000"* ]]
+}
+
+@test "cmd_allow: IP 白名单集合创建时包含 flags interval" {
+    # 不加 flags interval 的话，CIDR 前缀（如 10.19.1.0/24）会被 nft 静默拒绝
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
+
+    assert_nft_called "add set inet nftables-tool mongodb_allow { type ipv4_addr; flags interval; }"
+}
+
+@test "cmd_allow: 端口集合创建时包含 flags interval" {
+    # 不加 flags interval 的话，端口范围（如 2000-3000）会被 nft 静默拒绝
+    run cmd_allow "test-range" "10.0.0.0/16"
+    [ "$status" -eq 0 ]
+
+    assert_nft_called "add set inet nftables-tool test-range_ports { type inet_service; flags interval; }"
+}
+
+@test "cmd_allow: CIDR 格式 IP 能正确存入含 flags interval 的集合" {
+    # 端到端验证：CIDR 前缀白名单 IP 能写入并持久化
+    run cmd_allow "redis" "10.19.1.0/24"
+    [ "$status" -eq 0 ]
+
+    run mock_set_elements "inet nftables-tool" "redis_allow"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"10.19.1.0/24"* ]]
 }
 
 # =============================================================================
@@ -187,6 +213,30 @@ teardown() {
     run cmd_status
     [ "$status" -eq 0 ]
     [[ "$output" == *"nftables-tool"* ]]
+}
+
+@test "cmd_status: 使用 list table 而非 list sets 获取集合信息" {
+    # nft list sets 不接受 table 参数，会失败被 2>/dev/null 吞掉
+    # 正确做法是用 nft list table 获取完整表信息
+    cmd_allow "mongodb" "10.0.1.0/24"
+    > "$NFT_MOCK_LOG"
+
+    run cmd_status
+    [ "$status" -eq 0 ]
+
+    assert_nft_called "list table inet nftables-tool"
+    refute_nft_called "list sets"
+}
+
+@test "cmd_list: 使用 list table 而非 list sets 获取集合信息" {
+    cmd_allow "mongodb" "10.0.1.0/24"
+    > "$NFT_MOCK_LOG"
+
+    run cmd_list
+    [ "$status" -eq 0 ]
+
+    assert_nft_called "list table inet nftables-tool"
+    refute_nft_called "list sets"
 }
 
 # =============================================================================
