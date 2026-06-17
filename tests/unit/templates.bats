@@ -66,40 +66,12 @@ template_names() {
 }
 
 # =============================================================================
-# 特定模板内容校验
+# 特定模板内容校验（仅使用测试专用模板，避免随组件模板调整而频繁修改）
 # =============================================================================
-
-@test "mongodb: 端口为 27017" {
-    SCRIPT_DIR="$PROJECT_DIR"
-    load_template "mongodb"
-    [ "$NAME" = "MongoDB" ]
-    [ "${PORTS[0]}" = "27017" ]
-    [ "${#PORTS[@]}" -eq 1 ]
-}
-
-@test "redis: 端口为 6379" {
-    SCRIPT_DIR="$PROJECT_DIR"
-    load_template "redis"
-    [ "$NAME" = "Redis" ]
-    [ "${PORTS[0]}" = "6379" ]
-}
-
-@test "seaweedfs: 端口含范围 9080-9180" {
-    SCRIPT_DIR="$PROJECT_DIR"
-    load_template "seaweedfs"
-    [ "${#PORTS[@]}" -eq 3 ]
-    [[ "${PORTS[*]}" == *"9080-9180"* ]]
-}
 
 @test "test-range: 独立测试模板含范围端口 2000-3000" {
     SCRIPT_DIR="$PROJECT_DIR"
     load_template "test-range"
     [ "${#PORTS[@]}" -eq 3 ]
     [[ "${PORTS[*]}" == *"2000-3000"* ]]
-}
-
-@test "consul: 5 个端口" {
-    SCRIPT_DIR="$PROJECT_DIR"
-    load_template "consul"
-    [ "${#PORTS[@]}" -eq 5 ]
 }

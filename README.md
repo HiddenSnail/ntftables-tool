@@ -40,6 +40,9 @@ sudo ./nftables-tool.sh allow seaweedfs 10.0.0.0/16
 # 7. 查看规则
 ./nftables-tool.sh list
 ./nftables-tool.sh status
+
+# 8. 清除某个模板的全部配置（链/规则/集合）
+sudo ./nftables-tool.sh purge mongodb
 ```
 
 ## 命令参考
@@ -82,18 +85,22 @@ sudo ./nftables-tool.sh allow redis 192.168.0.5
 # CIDR 网段
 sudo ./nftables-tool.sh allow mongodb 10.0.1.0/24
 
-# 模板包含端口范围时，自动处理（如 seaweedfs: 9333, 8080-8180, 8888）
+# 模板包含端口范围时，自动处理（如 seaweedfs: 9333, 9080-9180, 8888）
 sudo ./nftables-tool.sh allow seaweedfs 10.0.0.0/16
-
-# 全开放（0.0.0.0/0），适用于不需要限制的组件
-sudo ./nftables-tool.sh allow seaweedfs-volume 0.0.0.0/0
 ```
 
 ### `deny <template> <ip[/mask]>`
-从白名单中移除指定 IP。集合为空时会提示清理链和规则。
+从白名单中移除指定 IP。
 
 ```bash
 sudo ./nftables-tool.sh deny mongodb 10.0.1.0/24
+```
+
+### `purge <template>`
+一键清除指定模板的所有配置，包括 input 跳转规则、专用链、IP 白名单集合和端口集合。
+
+```bash
+sudo ./nftables-tool.sh purge mongodb
 ```
 
 ### `list [template]`
@@ -134,7 +141,7 @@ sudo ./nftables-tool.sh reset
 |--------|------|------|
 | `mongodb` | 27017 | MongoDB 数据库 |
 | `redis` | 6379 | Redis 缓存 |
-| `seaweedfs` | 9333, 8080-8180, 8888 | SeaweedFS 分布式文件系统（master/volume/filer） |
+| `seaweedfs` | 9333, 9080-9180, 8888 | SeaweedFS 分布式文件系统（master/volume/filer） |
 | `mysql` | 3306 | MySQL / MariaDB |
 | `postgresql` | 5432 | PostgreSQL |
 | `elasticsearch` | 9200, 9300 | Elasticsearch（HTTP API + transport） |
@@ -143,7 +150,7 @@ sudo ./nftables-tool.sh reset
 | `consul` | 8300, 8301, 8302, 8500, 8600 | HashiCorp Consul（RPC/serf/HTTP/DNS） |
 | `etcd` | 2379, 2380 | etcd 键值存储（client + peer） |
 
-> 💡 **端口范围支持**：`.conf` 模板的 `PORTS` 支持端口范围语法（如 `8080-8180`），nftables `inet_service` 类型原生处理。SeaweedFS 的 volume 端口已使用范围表示。
+> 💡 **端口范围支持**：`.conf` 模板的 `PORTS` 支持端口范围语法（如 `9080-9180`），nftables `inet_service` 类型原生处理。SeaweedFS 的 volume 端口已使用范围表示。
 
 ## 自定义模板
 
@@ -163,7 +170,7 @@ PROTOCOL="tcp"
 sudo ./nftables-tool.sh allow my-cluster 10.0.1.0/24
 ```
 
-> 💡 **按组件拆分**：如果同一中间件的不同端口需要不同白名单策略，创建多个子模板即可。例如对 SeaweedFS 分别建 `seaweedfs-filer.conf`（`PORTS=("8888")`）和 `seaweedfs-volume.conf`（`PORTS=("8080-8180")`），各自独立管理。
+> 💡 **按组件拆分**：如果同一中间件的不同端口需要不同白名单策略，创建多个子模板即可。例如对 SeaweedFS 分别建 `seaweedfs-filer.conf`（`PORTS=("8888")`）和 `seaweedfs-volume.conf`（`PORTS=("9080-9180")`），各自独立管理。
 
 ## nftables 结构
 
@@ -189,7 +196,7 @@ table inet nftables-tool {
 
     set seaweedfs_ports {                   # 端口集合（含范围）
         type inet_service
-        elements = { 8888, 9333, 8080-8180 }
+        elements = { 8888, 9080-9180, 9333 }
     }
 }
 ```
