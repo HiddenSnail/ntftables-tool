@@ -36,6 +36,8 @@ source "${SCRIPT_DIR}/lib/installer.sh"
 # shellcheck source=lib/core.sh
 source "${SCRIPT_DIR}/lib/core.sh"
 
+# ---- 命令路由 ----
+
 # ---- 帮助信息 ----
 show_usage() {
     cat << 'EOF'
@@ -70,8 +72,6 @@ nftables-tool — nftables IP 白名单端口访问控制工具
 
 EOF
 }
-
-# ---- 命令路由 ----
 main() {
     if [ $# -eq 0 ]; then
         show_usage
