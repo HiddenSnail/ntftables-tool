@@ -9,6 +9,7 @@
 #   ./nftables-tool.sh template show <name>         查看模板详情
 #   ./nftables-tool.sh allow <template> <ip[/mask]> 白名单 IP 访问指定中间件
 #   ./nftables-tool.sh deny <template> <ip[/mask]>  移除白名单
+#   ./nftables-tool.sh purge <template>            清除模板的所有配置
 #   ./nftables-tool.sh list [template]             列出白名单规则
 #   ./nftables-tool.sh status                      显示运行状态
 #   ./nftables-tool.sh save                        持久化当前规则
@@ -55,6 +56,7 @@ nftables-tool — nftables IP 白名单端口访问控制工具
 
   allow <template> <ip[/mask]>   允许指定 IP 段访问模板对应的端口（需要 root）
   deny  <template> <ip[/mask]>   移除指定 IP 段的白名单授权（需要 root）
+  purge <template>               清除模板的所有配置（链/规则/集合，需要 root）
 
   list [template]                列出白名单规则（可指定模板过滤）
   status                         显示 nftables 运行状态与本工具规则概况
@@ -68,6 +70,7 @@ nftables-tool — nftables IP 白名单端口访问控制工具
   sudo ./nftables-tool.sh allow mongodb 10.0.1.0/24
   sudo ./nftables-tool.sh allow redis 192.168.0.5
   sudo ./nftables-tool.sh deny mongodb 10.0.1.0/24
+  sudo ./nftables-tool.sh purge mongodb
   ./nftables-tool.sh list
 
 EOF
@@ -108,6 +111,14 @@ main() {
                 exit 1
             fi
             cmd_deny "$1" "$2"
+            ;;
+
+        purge)
+            if [ $# -lt 1 ]; then
+                log_error "用法: nftables-tool.sh purge <template>"
+                exit 1
+            fi
+            cmd_purge "$1"
             ;;
 
         list)

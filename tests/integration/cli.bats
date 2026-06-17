@@ -158,6 +158,54 @@ teardown() {
 }
 
 # =============================================================================
+# purge
+# =============================================================================
+
+@test "CLI: purge 清除模板所有配置" {
+    run bash "$TOOL" init
+    [ "$status" -eq 0 ]
+
+    run bash "$TOOL" allow mongodb 10.0.1.0/24
+    [ "$status" -eq 0 ]
+
+    run bash "$TOOL" purge mongodb
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"已清除"* ]]
+
+    # 验证链和集合已被清除
+    assert_nft_called "flush chain inet nftables-tool mongodb_chain"
+    assert_nft_called "delete chain inet nftables-tool mongodb_chain"
+    assert_nft_called "delete set inet nftables-tool mongodb_allow"
+    assert_nft_called "delete set inet nftables-tool mongodb_ports"
+}
+
+@test "CLI: purge 缺参数报错" {
+    run bash "$TOOL" purge
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"用法"* ]]
+}
+
+@test "CLI: purge 不影响其他模板" {
+    run bash "$TOOL" init
+    [ "$status" -eq 0 ]
+
+    run bash "$TOOL" allow mongodb 10.0.1.0/24
+    [ "$status" -eq 0 ]
+
+    run bash "$TOOL" allow redis 192.168.0.5
+    [ "$status" -eq 0 ]
+
+    run bash "$TOOL" purge mongodb
+    [ "$status" -eq 0 ]
+
+    # list 验证 redis 还在，mongodb 不在
+    run bash "$TOOL" list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"redis"* || "$output" == *"Redis"* ]]
+    [[ "$output" != *"mongodb"* && "$output" != *"MongoDB"* ]]
+}
+
+# =============================================================================
 # --dry-run
 # =============================================================================
 

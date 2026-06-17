@@ -200,6 +200,28 @@ main() {
                     rm -f "$MOCK_STATE"/chain_*
                     rm -f "$MOCK_STATE"/set_*
                     ;;
+                chain)
+                    local table="$3"
+                    local chain="$4"
+                    rm -f "$(_chain_file "$table" "$chain")"
+                    ;;
+                set)
+                    local table="$3"
+                    local set_name="$4"
+                    rm -f "$(_set_file "$table" "$set_name")"
+                    ;;
+                rule)
+                    # delete rule: delete rule TABLE CHAIN handle N
+                    local table="$3"
+                    local chain="$4"
+                    # args: handle <N>
+                    local handle="${6:-}"
+                    if [ -n "$handle" ] && [ -f "$(_chain_file "$table" "$chain")" ]; then
+                        local tmp="$(_chain_file "$table" "$chain").tmp"
+                        sed "${handle}d" "$(_chain_file "$table" "$chain")" > "$tmp" 2>/dev/null
+                        mv "$tmp" "$(_chain_file "$table" "$chain")"
+                    fi
+                    ;;
                 element)
                     local table="$3"
                     local set_name="$4"
@@ -228,6 +250,20 @@ main() {
                     rm -f "$MOCK_STATE"/table_*
                     rm -f "$MOCK_STATE"/chain_*
                     rm -f "$MOCK_STATE"/set_*
+                    ;;
+                chain)
+                    local table="$3"
+                    local chain="$4"
+                    if [ -f "$(_chain_file "$table" "$chain")" ]; then
+                        > "$(_chain_file "$table" "$chain")"
+                    fi
+                    ;;
+                set)
+                    local table="$3"
+                    local set_name="$4"
+                    if [ -f "$(_set_file "$table" "$set_name")" ]; then
+                        > "$(_set_file "$table" "$set_name")"
+                    fi
                     ;;
             esac
             ;;

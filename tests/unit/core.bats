@@ -270,6 +270,85 @@ teardown() {
 }
 
 # =============================================================================
+# cmd_purge
+# =============================================================================
+
+@test "cmd_purge: 清除模板的所有配置" {
+    cmd_allow "mongodb" "10.0.1.0/24"
+
+    run cmd_purge "mongodb"
+    [ "$status" -eq 0 ]
+
+    # 验证链已删除
+    run mock_chain_exists "inet nftables-tool" "mongodb_chain"
+    [ "$status" -ne 0 ]
+
+    # 验证 IP 集合已删除
+    run mock_set_elements "inet nftables-tool" "mongodb_allow"
+    [ "$status" -ne 0 ] || [ -z "$output" ]
+
+    # 验证端口集合已删除
+    run mock_set_elements "inet nftables-tool" "mongodb_ports"
+    [ "$status" -ne 0 ] || [ -z "$output" ]
+
+    # 验证 nft 调用记录
+    assert_nft_called "flush chain inet nftables-tool mongodb_chain"
+    assert_nft_called "delete chain inet nftables-tool mongodb_chain"
+    assert_nft_called "flush set inet nftables-tool mongodb_allow"
+    assert_nft_called "delete set inet nftables-tool mongodb_allow"
+    assert_nft_called "flush set inet nftables-tool mongodb_ports"
+    assert_nft_called "delete set inet nftables-tool mongodb_ports"
+}
+
+@test "cmd_purge: 表不存在时正常退出" {
+    "$NFT_MOCK_DIR/nft" delete table "$TABLE"
+
+    run cmd_purge "mongodb"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"无需操作"* ]]
+}
+
+@test "cmd_purge: 部分组件缺失时仍成功执行" {
+    # 只创建 allow set 不创建其他（模拟部分清理后的状态）
+    cmd_allow "mongodb" "10.0.1.0/24"
+
+    run cmd_purge "mongodb"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"已清除"* ]]
+}
+
+@test "cmd_purge: 不影响其他模板" {
+    cmd_allow "mongodb" "10.0.1.0/24"
+    cmd_allow "redis" "192.168.0.5"
+
+    run cmd_purge "mongodb"
+    [ "$status" -eq 0 ]
+
+    # redis 不应受影响
+    run mock_chain_exists "inet nftables-tool" "redis_chain"
+    [ "$status" -eq 0 ]
+
+    run mock_set_elements "inet nftables-tool" "redis_allow"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"192.168.0.5"* ]]
+
+    # mongodb 链和集合应被清除
+    run mock_chain_exists "inet nftables-tool" "mongodb_chain"
+    [ "$status" -ne 0 ]
+}
+
+@test "cmd_purge: input 链中无跳转规则时仍可清理" {
+    cmd_allow "mongodb" "10.0.1.0/24"
+    # 手动删掉 input 中的跳转规则（模拟残留）
+    "$NFT_MOCK_DIR/nft" delete chain "$TABLE" input
+    "$NFT_MOCK_DIR/nft" add chain "$TABLE" input
+
+    run cmd_purge "mongodb"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"已清除"* ]]
+}
+
+# =============================================================================
 # cmd_reset
 # =============================================================================
 

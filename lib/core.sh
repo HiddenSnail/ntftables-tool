@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #===============================================================================
 # core.sh - nftables 规则核心管理
-# 提供：init, allow, deny, list, status, save, reset
+# 提供：init, allow, deny, purge, list, status, save, reset
 #===============================================================================
 
 # 依赖 common.sh，由主入口 source 引入
@@ -319,6 +319,75 @@ cmd_deny() {
     fi
 
     _save_rules
+}
+
+# =============================================================================
+# cmd_purge - 清除模板的所有配置（规则、链、IP集、端口集）
+# =============================================================================
+cmd_purge() {
+    local template_name="$1"
+
+    set +e; set +o pipefail
+
+    check_root
+    validate_template_name "$template_name"
+    load_template "$template_name"
+
+    local chain_name="${template_name}_chain"
+    local set_name="${template_name}_allow"
+    local port_set_name="${template_name}_ports"
+
+    if ! _table_exists; then
+        log_error "表 $TABLE 不存在，无需操作。"
+        exit 0
+    fi
+
+    log_info "正在清除 ${NAME}（${template_name}）的所有配置..."
+
+    # 1. 删除 input 链中的跳转规则
+    if _chain_exists "input"; then
+        local handles
+        handles=$(_get_rule_handles "input" "jump ${chain_name}")
+        for h in $handles; do
+            log_step "删除 input 跳转规则 (handle $h)"
+            nft delete rule "$TABLE" input handle "$h" 2>/dev/null || true
+        done
+    fi
+
+    # 2. 删除模板链（需先 flush 清空规则，nft 不允许删除非空链）
+    if _chain_exists "$chain_name"; then
+        log_step "清空链规则: $chain_name"
+        nft flush chain "$TABLE" "$chain_name" 2>/dev/null || true
+        log_step "删除链: $chain_name"
+        nft delete chain "$TABLE" "$chain_name" 2>/dev/null || true
+    else
+        log_info "链 $chain_name 不存在，跳过。"
+    fi
+
+    # 3. 删除 IP 白名单集合
+    if _set_exists "$set_name"; then
+        log_step "清空 IP 白名单集合: $set_name"
+        nft flush set "$TABLE" "$set_name" 2>/dev/null || true
+        log_step "删除 IP 白名单集合: $set_name"
+        nft delete set "$TABLE" "$set_name" 2>/dev/null || true
+    else
+        log_info "集合 $set_name 不存在，跳过。"
+    fi
+
+    # 4. 删除端口集合
+    if _set_exists "$port_set_name"; then
+        log_step "清空端口集合: $port_set_name"
+        nft flush set "$TABLE" "$port_set_name" 2>/dev/null || true
+        log_step "删除端口集合: $port_set_name"
+        nft delete set "$TABLE" "$port_set_name" 2>/dev/null || true
+    else
+        log_info "集合 $port_set_name 不存在，跳过。"
+    fi
+
+    # 5. 持久化
+    _save_rules
+
+    log_info "✓ ${NAME} 配置已清除。"
 }
 
 # =============================================================================
