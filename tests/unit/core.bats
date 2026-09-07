@@ -305,6 +305,30 @@ teardown() {
     [[ "$output" != *"redis"* && "$output" != *"Redis"* ]]
 }
 
+@test "cmd_list: elements 多行折行输出时完整列出所有 IP（真实 nft 兼容）" {
+    # 真实 nft 在元素较多/较长时会把 elements 折成多行，
+    # 旧实现只解析首行导致续行 IP 丢失（复现: seaweedfs 3 个 IP 只显示 2 个）
+    run cmd_allow "seaweedfs" "10.19.0.0/16"
+    [ "$status" -eq 0 ]
+    run cmd_allow "seaweedfs" "10.208.11.191"
+    [ "$status" -eq 0 ]
+    run cmd_allow "seaweedfs" "10.208.58.208"
+    [ "$status" -eq 0 ]
+
+    # 确认 mock 输出确实折行（与真实 nft 行为一致），否则测试无意义
+    local raw nlines
+    raw=$("$NFT_MOCK_DIR/nft" list set "$TABLE" seaweedfs_allow)
+    nlines=$(printf '%s\n' "$raw" | grep -c '10\.')
+    echo "elements 折行行数: $nlines"
+    [ "$nlines" -ge 2 ]
+
+    run cmd_list "seaweedfs"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"10.19.0.0/16"* ]]
+    [[ "$output" == *"10.208.11.191"* ]]
+    [[ "$output" == *"10.208.58.208"* ]]
+}
+
 # =============================================================================
 # cmd_status
 # =============================================================================
@@ -316,6 +340,20 @@ teardown() {
     run cmd_status
     [ "$status" -eq 0 ]
     [[ "$output" == *"nftables-tool"* ]]
+}
+
+@test "cmd_status: elements 多行折行输出时 IP 数量统计完整" {
+    # 与 cmd_list 折行场景相同：旧实现只统计 elements 首行，会少算
+    run cmd_allow "seaweedfs" "10.19.0.0/16"
+    [ "$status" -eq 0 ]
+    run cmd_allow "seaweedfs" "10.208.11.191"
+    [ "$status" -eq 0 ]
+    run cmd_allow "seaweedfs" "10.208.58.208"
+    [ "$status" -eq 0 ]
+
+    run cmd_status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"seaweedfs: 3 个 IP"* ]]
 }
 
 @test "cmd_status: 使用 list table 而非 list sets 获取集合信息" {

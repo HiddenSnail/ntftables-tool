@@ -101,6 +101,36 @@ _get_set_elements() {
         | sort -u
 }
 
+# 从集合输出中提取 elements 块内的全部元素，每行一个。
+# 真实 nft 在元素较多/较长时会把 elements 折成多行，仅 grep 首行会丢失续行元素，
+# 故此处从 "elements = {" 到闭合 "}" 整块截取后再按逗号拆分。
+_get_set_members() {
+    local set_name="$1"
+    # grep -v 输出会为末行补上换行（sed 会保留“无结尾换行”，导致 wc -l 少计 1）
+    nft list set "$TABLE" "$set_name" 2>/dev/null \
+        | sed -n '/elements = {/,/}/p' \
+        | tr '\n' ' ' \
+        | sed 's/.*elements = { *//; s/ *}.*//' \
+        | tr ',' '\n' \
+        | sed 's/^ *//; s/ *$//' \
+        | grep -v '^$'
+}
+
+# 打印集合成员（每行一个 "prefix- item"），供 list/status/allow 展示；空集合打印 "(空)"
+_print_set_members() {
+    local prefix="$1"
+    local set_name="$2"
+    local items
+    items=$(_get_set_members "$set_name")
+    if [ -z "$items" ]; then
+        echo "${prefix}(空)"
+        return 0
+    fi
+    while read -r item; do
+        [ -n "$item" ] && echo "${prefix}- $item"
+    done <<< "$items"
+}
+
 # ---- 白名单包含关系检查 ----
 # 在向 interval 集合 add element 前检查重叠关系，返回：
 #   0 = 无冲突可添加；1 = 新网段覆盖已有元素，需先 deny（已打印提示）；
@@ -359,7 +389,7 @@ cmd_allow() {
     if [ "$overlap_rc" -eq 2 ]; then
         # 已包含，无需添加，也无需重复持久化
         log_info "  当前白名单:"
-        nft list set "$TABLE" "$set_name" 2>/dev/null | grep -E '^\s+elements' || echo "  (空)"
+        _print_set_members "  " "$set_name"
         return 0
     elif [ "$overlap_rc" -eq 1 ]; then
         # 需先 deny 旧元素，中止本次添加
@@ -378,7 +408,7 @@ cmd_allow() {
 
     log_info "✓ ${NAME} 白名单已更新。"
     log_info "  当前白名单:"
-    nft list set "$TABLE" "$set_name" 2>/dev/null | grep -E '^\s+elements' || echo "  (空)"
+    _print_set_members "  " "$set_name"
 }
 
 # =============================================================================
@@ -419,7 +449,7 @@ cmd_deny() {
 
     # 检查集合是否为空，提示用户清理
     local remaining
-    remaining=$(nft list set "$TABLE" "$set_name" 2>/dev/null | grep 'elements = {' | sed 's/.*elements = { *//;s/ *}.*//' | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ' || echo "0")
+    remaining=$(_get_set_members "$set_name" | wc -l | tr -d ' ' || echo "0")
     if [ "$remaining" -eq 0 ]; then
         log_warn "${NAME} 白名单已为空。"
         log_info "如需清理对应链和规则，请手动执行:"
@@ -550,23 +580,13 @@ cmd_list() {
         # 从端口集合中读取
         local port_set="${s}_ports"
         if nft list set "$TABLE" "$port_set" &>/dev/null; then
-            nft list set "$TABLE" "$port_set" 2>/dev/null | grep 'elements = {' | sed 's/.*elements = { *//;s/ *}.*//' | tr ',' '\n' | sed 's/^ *//;s/ *$//' | while read -r p; do
-                [ -n "$p" ] && echo "     - $p"
-            done || true
+            _print_set_members "     " "$port_set"
         else
             echo "     (未配置)"
         fi
 
         echo "   白名单 IP:"
-        local elements
-        elements=$(nft list set "$TABLE" "$set_full" 2>/dev/null | grep 'elements = {' | sed 's/.*elements = { *//;s/ *}.*//' | tr ',' '\n' | sed 's/^ *//;s/ *$//' || true)
-        if [ -z "$elements" ]; then
-            echo "     (空)"
-        else
-            echo "$elements" | while read -r ip; do
-                echo "     - $ip"
-            done || true
-        fi
+        _print_set_members "     " "$set_full"
     done
 
     echo ""
@@ -626,7 +646,7 @@ cmd_status() {
             echo "各集合 IP 数量:"
             for s in $sets; do
                 local count
-                count=$(nft list set "$TABLE" "${s}_allow" 2>/dev/null | grep 'elements = {' | sed 's/.*elements = { *//;s/ *}.*//' | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ' || echo "0")
+                count=$(_get_set_members "${s}_allow" | wc -l | tr -d ' ' || echo "0")
                 echo "  - ${s}: ${count} 个 IP"
             done
         fi
