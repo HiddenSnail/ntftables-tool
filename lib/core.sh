@@ -53,6 +53,101 @@ _get_rule_handles() {
     nft -a list chain "$TABLE" "$chain" 2>/dev/null | grep "$pattern" | awk '{print $NF}' || true
 }
 
+# ---- IPv4 / CIDR 工具函数（白名单包含关系判断用）----
+
+# 点分十进制 IPv4 -> 32 位无符号整数
+_ipv4_to_int() {
+    local ip="$1" o1 o2 o3 o4
+    IFS=. read -r o1 o2 o3 o4 <<< "$ip"
+    echo $(( (o1 << 24) + (o2 << 16) + (o3 << 8) + o4 ))
+}
+
+# 前缀长度 -> 子网掩码（32 位无符号整数）
+_prefix_mask() {
+    local prefix="$1"
+    if [ "$prefix" -le 0 ]; then
+        echo 0
+    elif [ "$prefix" -ge 32 ]; then
+        echo 4294967295
+    else
+        echo $(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
+    fi
+}
+
+# 解析 "ip" 或 "ip/prefix"，输出起始/结束地址整数（start end）
+_cidr_bounds() {
+    local input="$1" ip prefix ip_int mask start size
+    if [[ "$input" == */* ]]; then
+        ip="${input%/*}"
+        prefix="${input#*/}"
+        [ "$prefix" -le 32 ] || prefix=32
+    else
+        ip="$input"
+        prefix=32
+    fi
+    # 注意：算术表达式 $(( )) 内不能直接调用 shell 函数，需先取到值再参与计算
+    ip_int=$(_ipv4_to_int "$ip")
+    mask=$(_prefix_mask "$prefix")
+    start=$(( ip_int & mask ))
+    size=$(( 1 << (32 - prefix) ))
+    echo "$start $(( start + size - 1 ))"
+}
+
+# 从集合中提取现有元素（兼容多行 elements 输出与单 IP 主机）
+_get_set_elements() {
+    local set_name="$1"
+    nft list set "$TABLE" "$set_name" 2>/dev/null \
+        | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' \
+        | sort -u
+}
+
+# ---- 白名单包含关系检查 ----
+# 在向 interval 集合 add element 前检查重叠关系，返回：
+#   0 = 无冲突可添加；1 = 新网段覆盖已有元素，需先 deny（已打印提示）；
+#   2 = 新网段已被现有元素覆盖（含完全相同），无需添加（已打印提示）
+_check_whitelist_overlap() {
+    local set_name="$1"
+    local ip_range="$2"
+    local template_name="$3"
+
+    local new_start new_end
+    read -r new_start new_end <<< "$(_cidr_bounds "$ip_range")"
+
+    local covered_by=""
+    local -a need_deny=()
+    local elem e_start e_end
+
+    while read -r elem; do
+        [ -n "$elem" ] || continue
+        read -r e_start e_end <<< "$(_cidr_bounds "$elem")"
+
+        # 新网段完全被该现有元素覆盖（含重复添加相同网段）
+        if [ "$new_start" -ge "$e_start" ] && [ "$new_end" -le "$e_end" ]; then
+            covered_by="$elem"
+        # 新网段覆盖了该现有元素
+        elif [ "$new_start" -le "$e_start" ] && [ "$new_end" -ge "$e_end" ]; then
+            need_deny+=("$elem")
+        fi
+    done <<< "$(_get_set_elements "$set_name")"
+
+    if [ -n "$covered_by" ]; then
+        log_info "网段 $ip_range 已包含在现有白名单元素 $covered_by 中，无需添加。"
+        return 2
+    fi
+
+    if [ "${#need_deny[@]}" -gt 0 ]; then
+        log_warn "网段 $ip_range 覆盖了以下现有白名单元素（nftables 区间集合不允许重叠）："
+        local d
+        for d in "${need_deny[@]}"; do
+            log_warn "  请先执行: nftables-tool.sh deny ${template_name} ${d}"
+        done
+        log_warn "移除后再重新执行 allow 添加 $ip_range 即可（新网段已包含旧网段，无需再加回）。"
+        return 1
+    fi
+
+    return 0
+}
+
 # 保存规则到 /etc/nftables.conf
 _save_rules() {
     log_step "持久化规则到 /etc/nftables.conf..."
@@ -257,10 +352,25 @@ cmd_allow() {
             comment "\"Reject other ${NAME} traffic\""
     fi
 
-    # 5. 添加 IP 到白名单集合
+    # 5. 添加 IP 到白名单集合（先做包含关系检查，避免 interval 集合重叠被拒）
+    log_step "检查 $ip_range 与现有白名单的包含关系..."
+    _check_whitelist_overlap "$set_name" "$ip_range" "$template_name"
+    local overlap_rc=$?
+    if [ "$overlap_rc" -eq 2 ]; then
+        # 已包含，无需添加，也无需重复持久化
+        log_info "  当前白名单:"
+        nft list set "$TABLE" "$set_name" 2>/dev/null | grep -E '^\s+elements' || echo "  (空)"
+        return 0
+    elif [ "$overlap_rc" -eq 1 ]; then
+        # 需先 deny 旧元素，中止本次添加
+        exit 1
+    fi
+
     log_step "添加 $ip_range 到白名单集合 $set_name"
-    nft add element "$TABLE" "$set_name" "{ $ip_range }" 2>/dev/null || {
-        log_warn "$ip_range 可能已在白名单中。"
+    local add_err
+    add_err=$(nft add element "$TABLE" "$set_name" "{ $ip_range }" 2>&1) || {
+        log_warn "添加 $ip_range 失败: ${add_err:-未知错误}"
+        exit 1
     }
 
     # 6. 持久化

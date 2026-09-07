@@ -56,7 +56,8 @@ teardown() {
 
 @test "cmd_allow: 重复执行幂等，不创建重复规则" {
     # 第一次
-    cmd_allow "mongodb" "10.0.1.0/24"
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
 
     # 清空日志，第二次
     > "$NFT_MOCK_LOG"
@@ -135,14 +136,109 @@ teardown() {
     [[ "$output" == *"10.19.1.0/24"* ]]
 }
 
+@test "CIDR 工具: _cidr_bounds 正确计算网段边界" {
+    run _cidr_bounds "10.19.0.0/16"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "169017344 169082879" ]]
+
+    run _cidr_bounds "10.19.1.0/24"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "169017600 169017855" ]]
+
+    # 单 IP 视作 /32
+    run _cidr_bounds "192.168.1.5"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "3232235781 3232235781" ]]
+}
+
+@test "CIDR 工具: _check_whitelist_overlap 判断包含/覆盖/无冲突" {
+    # 预置现有元素 10.19.1.0/24
+    printf '10.19.1.0/24\n' > "$NFT_MOCK_STATE_DIR/set_${TABLE}_redis_allow"
+
+    # 新网段被现有元素包含 -> 2
+    run _check_whitelist_overlap "redis_allow" "10.19.1.128/25" "redis"
+    [ "$status" -eq 2 ]
+
+    # 新网段覆盖现有元素 -> 1，提示先 deny
+    run _check_whitelist_overlap "redis_allow" "10.19.0.0/16" "redis"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"deny redis 10.19.1.0/24"* ]]
+
+    # 完全无关 -> 0
+    run _check_whitelist_overlap "redis_allow" "192.168.0.0/24" "redis"
+    [ "$status" -eq 0 ]
+}
+
+@test "cmd_allow: 新网段被现有网段完全包含时跳过添加" {
+    # 先添加较宽网段
+    run cmd_allow "redis" "10.0.0.0/8"
+    [ "$status" -eq 0 ]
+
+    > "$NFT_MOCK_LOG"
+    run cmd_allow "redis" "10.19.1.0/24"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"已包含在现有白名单元素 10.0.0.0/8 中，无需添加"* ]]
+    # 不应触发 add element
+    refute_nft_called "add element inet nftables-tool redis_allow"
+    # 集合仍只有宽网段
+    run mock_set_elements "inet nftables-tool" "redis_allow"
+    [[ "$output" == *"10.0.0.0/8"* ]]
+    [[ "$output" != *"10.19.1.0/24"* ]]
+}
+
+@test "cmd_allow: 重复添加相同网段时跳过并提示已包含" {
+    run cmd_allow "redis" "10.19.1.0/24"
+    [ "$status" -eq 0 ]
+
+    > "$NFT_MOCK_LOG"
+    run cmd_allow "redis" "10.19.1.0/24"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"已包含在现有白名单元素 10.19.1.0/24 中，无需添加"* ]]
+    refute_nft_called "add element inet nftables-tool redis_allow"
+}
+
+@test "cmd_allow: 新网段覆盖已有网段时提示先 deny 并中止" {
+    # 先添加较窄网段
+    run cmd_allow "redis" "10.19.1.0/24"
+    [ "$status" -eq 0 ]
+
+    > "$NFT_MOCK_LOG"
+    run cmd_allow "redis" "10.19.0.0/16"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"deny redis 10.19.1.0/24"* ]]
+    # 新网段未被添加
+    run mock_set_elements "inet nftables-tool" "redis_allow"
+    [[ "$output" == *"10.19.1.0/24"* ]]
+    [[ "$output" != *"10.19.0.0/16"* ]]
+}
+
+@test "cmd_allow: 新网段覆盖多个已有网段时全部提示 deny" {
+    run cmd_allow "redis" "10.19.1.0/24"
+    [ "$status" -eq 0 ]
+    run cmd_allow "redis" "10.19.2.0/24"
+    [ "$status" -eq 0 ]
+
+    > "$NFT_MOCK_LOG"
+    run cmd_allow "redis" "10.19.0.0/16"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"deny redis 10.19.1.0/24"* ]]
+    [[ "$output" == *"deny redis 10.19.2.0/24"* ]]
+}
+
 # =============================================================================
 # cmd_deny
 # =============================================================================
 
 @test "cmd_deny: 移除存在的 IP" {
     # 先添加
-    cmd_allow "redis" "192.168.1.0/24"
-    cmd_allow "redis" "10.0.0.5"
+    run cmd_allow "redis" "192.168.1.0/24"
+    [ "$status" -eq 0 ]
+    run cmd_allow "redis" "10.0.0.5"
+    [ "$status" -eq 0 ]
 
     # 移除一个
     run cmd_deny "redis" "192.168.1.0/24"
@@ -155,7 +251,8 @@ teardown() {
 }
 
 @test "cmd_deny: 移除不存在的 IP 给出警告" {
-    cmd_allow "redis" "10.0.0.5"
+    run cmd_allow "redis" "10.0.0.5"
+    [ "$status" -eq 0 ]
 
     run cmd_deny "redis" "192.168.1.1"
     [ "$status" -eq 0 ]
@@ -163,7 +260,8 @@ teardown() {
 }
 
 @test "cmd_deny: 集合清空后提示清理" {
-    cmd_allow "redis" "10.0.0.5"
+    run cmd_allow "redis" "10.0.0.5"
+    [ "$status" -eq 0 ]
     run cmd_deny "redis" "10.0.0.5"
 
     [ "$status" -eq 0 ]
@@ -182,8 +280,10 @@ teardown() {
 }
 
 @test "cmd_list: 显示已添加的规则" {
-    cmd_allow "mongodb" "10.0.1.0/24"
-    cmd_allow "redis" "192.168.0.5"
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
+    run cmd_allow "redis" "192.168.0.5"
+    [ "$status" -eq 0 ]
 
     run cmd_list
     [ "$status" -eq 0 ]
@@ -194,8 +294,10 @@ teardown() {
 }
 
 @test "cmd_list: 按模板过滤" {
-    cmd_allow "mongodb" "10.0.1.0/24"
-    cmd_allow "redis" "192.168.0.5"
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
+    run cmd_allow "redis" "192.168.0.5"
+    [ "$status" -eq 0 ]
 
     run cmd_list "mongodb"
     [ "$status" -eq 0 ]
@@ -208,7 +310,8 @@ teardown() {
 # =============================================================================
 
 @test "cmd_status: 显示表存在且统计正确" {
-    cmd_allow "mongodb" "10.0.1.0/24"
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
 
     run cmd_status
     [ "$status" -eq 0 ]
@@ -218,7 +321,8 @@ teardown() {
 @test "cmd_status: 使用 list table 而非 list sets 获取集合信息" {
     # nft list sets 不接受 table 参数，会失败被 2>/dev/null 吞掉
     # 正确做法是用 nft list table 获取完整表信息
-    cmd_allow "mongodb" "10.0.1.0/24"
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
     > "$NFT_MOCK_LOG"
 
     run cmd_status
@@ -229,7 +333,8 @@ teardown() {
 }
 
 @test "cmd_list: 使用 list table 而非 list sets 获取集合信息" {
-    cmd_allow "mongodb" "10.0.1.0/24"
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
     > "$NFT_MOCK_LOG"
 
     run cmd_list
@@ -274,7 +379,8 @@ teardown() {
 # =============================================================================
 
 @test "cmd_purge: 清除模板的所有配置" {
-    cmd_allow "mongodb" "10.0.1.0/24"
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
 
     run cmd_purge "mongodb"
     [ "$status" -eq 0 ]
@@ -310,7 +416,8 @@ teardown() {
 
 @test "cmd_purge: 部分组件缺失时仍成功执行" {
     # 只创建 allow set 不创建其他（模拟部分清理后的状态）
-    cmd_allow "mongodb" "10.0.1.0/24"
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
 
     run cmd_purge "mongodb"
     [ "$status" -eq 0 ]
@@ -318,8 +425,10 @@ teardown() {
 }
 
 @test "cmd_purge: 不影响其他模板" {
-    cmd_allow "mongodb" "10.0.1.0/24"
-    cmd_allow "redis" "192.168.0.5"
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
+    run cmd_allow "redis" "192.168.0.5"
+    [ "$status" -eq 0 ]
 
     run cmd_purge "mongodb"
     [ "$status" -eq 0 ]
@@ -338,7 +447,8 @@ teardown() {
 }
 
 @test "cmd_purge: input 链中无跳转规则时仍可清理" {
-    cmd_allow "mongodb" "10.0.1.0/24"
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
     # 手动删掉 input 中的跳转规则（模拟残留）
     "$NFT_MOCK_DIR/nft" delete chain "$TABLE" input
     "$NFT_MOCK_DIR/nft" add chain "$TABLE" input
@@ -353,7 +463,8 @@ teardown() {
 # =============================================================================
 
 @test "cmd_reset: 删除表" {
-    cmd_allow "mongodb" "10.0.1.0/24"
+    run cmd_allow "mongodb" "10.0.1.0/24"
+    [ "$status" -eq 0 ]
 
     NFT_RESET_FORCE=true run cmd_reset
     [ "$status" -eq 0 ]
